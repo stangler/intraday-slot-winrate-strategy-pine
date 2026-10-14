@@ -1,0 +1,173 @@
+//@version=6
+strategy("時間帯別戦略", overlay=true, max_bars_back=5000, default_qty_type=strategy.fixed, default_qty_value=100, margin_long=0, margin_short=0)
+
+lookbackMinCount = input.int(3, "最低サンプル日数(全期間判定用)", minval=1)
+flatAtClose      = input.bool(true, "大引け前に手仕舞い")
+showTable        = input.bool(true, "スロット別成績表示")
+
+if timeframe.period != "30"
+    runtime.error("30分足専用")
+
+morningStart   = 9*60+0
+morningEnd     = 11*60+30
+afternoonStart = 12*60+30
+afternoonEnd   = 15*60+30
+morningSlots   = int((morningEnd - morningStart) / 30)
+afternoonSlots = int((afternoonEnd - afternoonStart) / 30)
+totalSlots     = morningSlots + afternoonSlots
+
+h = hour(time, "Asia/Tokyo")
+m = minute(time, "Asia/Tokyo")
+nowMin = h*60+m
+
+getSlot() =>
+    result = -1
+    if nowMin >= morningStart and nowMin < morningEnd
+        result := int((nowMin - morningStart) / 30)
+    else if nowMin >= afternoonStart and nowMin < afternoonEnd
+        result := int(morningSlots + (nowMin - afternoonStart) / 30)
+    result
+
+slot = getSlot()
+
+var int dayCount = 0
+var int lastDay = -1
+today = dayofmonth + month*100 + year*10000
+if today != lastDay
+    dayCount := dayCount + 1
+    lastDay := today
+
+// ── 全期間累積(エントリー判定専用、表示なし) ──
+var cntUp   = array.new_int(totalSlots, 0)
+var cntDown = array.new_int(totalSlots, 0)
+var cntAll  = array.new_int(totalSlots, 0)
+
+// ── ローリングウィンドウ(30日: 陽陰 + 変化率) ──
+// matrix・関数を使わず、平坦な配列(slot*30+位置)で保持しインライン更新する
+var bufUp30  = array.new_int(totalSlots * 30, 0)
+var bufChg30 = array.new_float(totalSlots * 30, 0.0)
+var ptr30    = array.new_int(totalSlots, 0)
+var filled30 = array.new_int(totalSlots, 0)
+var up30     = array.new_int(totalSlots, 0)
+var down30   = array.new_int(totalSlots, 0)
+var sumChg30 = array.new_float(totalSlots, 0.0)
+
+if barstate.isconfirmed and slot >= 0
+    array.set(cntAll, slot, array.get(cntAll, slot) + 1)
+    if close > open
+        array.set(cntUp, slot, array.get(cntUp, slot) + 1)
+    else if close < open
+        array.set(cntDown, slot, array.get(cntDown, slot) + 1)
+
+    // 30日ウィンドウ(同値の足は除外)
+    if close != open
+        upFlag = close > open ? 1 : 0
+        chgPct = (close - open) / open * 100
+        pos    = slot * 30 + array.get(ptr30, slot)
+        fillN  = array.get(filled30, slot)
+        if fillN >= 30
+            oldUp  = array.get(bufUp30, pos)
+            oldChg = array.get(bufChg30, pos)
+            array.set(up30,   slot, array.get(up30, slot)   - oldUp)
+            array.set(down30, slot, array.get(down30, slot) - (1 - oldUp))
+            array.set(sumChg30, slot, array.get(sumChg30, slot) - oldChg)
+        else
+            array.set(filled30, slot, fillN + 1)
+        array.set(bufUp30,  pos, upFlag)
+        array.set(bufChg30, pos, chgPct)
+        array.set(up30,   slot, array.get(up30, slot)   + upFlag)
+        array.set(down30, slot, array.get(down30, slot) + (1 - upFlag))
+        array.set(sumChg30, slot, array.get(sumChg30, slot) + chgPct)
+        array.set(ptr30, slot, (array.get(ptr30, slot) + 1) % 30)
+
+n       = slot >= 0 ? array.get(cntAll, slot) : 0
+winRate = n > 0 ? array.get(cntUp, slot) / n : na
+
+label_ = n < lookbackMinCount ? "データ不足" : winRate > 0.5 ? "上昇" : winRate < 0.5 ? "下落" : "五分五分"
+
+bg = switch label_
+    "上昇" => color.new(color.green, 40)
+    "下落" => color.new(color.red, 40)
+    => na
+
+bgcolor(bg)
+
+if barstate.isconfirmed
+    if flatAtClose and slot == totalSlots - 1
+        strategy.close_all()
+    else if label_ == "上昇"
+        strategy.entry("Long", strategy.long)
+    else if label_ == "下落"
+        strategy.entry("Short", strategy.short)
+
+slotToTime(i) =>
+    mins = i < morningSlots ? morningStart + i*30 : afternoonStart + (i - morningSlots)*30
+    hh = int(mins / 60)
+    mm = mins % 60
+    str.tostring(hh) + ":" + (mm < 10 ? "0" : "") + str.tostring(mm)
+
+f_wr30(idx) =>
+    f = array.get(filled30, idx)
+    f > 0 ? float(array.get(up30, idx)) / f * 100 : na
+
+f_chg30(idx) =>
+    f = array.get(filled30, idx)
+    f > 0 ? array.get(sumChg30, idx) / f : na
+
+if showTable and barstate.islast
+    var table perfTable = table.new(position.top_right, 5, totalSlots + 3, border_width=1)
+    table.cell(perfTable, 0, 0, "", bgcolor=color.new(color.orange,50))
+    for cc = 1 to 4
+        table.cell(perfTable, cc, 0, "", bgcolor=color.new(color.orange,50))
+
+    table.cell(perfTable, 0, 1, "全期間: " + str.tostring(dayCount) + "日", bgcolor=color.new(color.orange,50), text_color=color.white)
+    for cc = 1 to 4
+        table.cell(perfTable, cc, 1, "", bgcolor=color.new(color.orange,50))
+
+    table.cell(perfTable, 0, 2, "区間",        bgcolor=color.new(color.blue,70), text_color=color.white)
+    table.cell(perfTable, 1, 2, "30日陽",      bgcolor=color.new(color.blue,70), text_color=color.white)
+    table.cell(perfTable, 2, 2, "30日陰",      bgcolor=color.new(color.blue,70), text_color=color.white)
+    table.cell(perfTable, 3, 2, "30日勝率%",   bgcolor=color.new(color.blue,70), text_color=color.white)
+    table.cell(perfTable, 4, 2, "30日平均変化%", bgcolor=color.new(color.blue,70), text_color=color.white)
+
+    for i = 0 to totalSlots - 1
+        u30 = array.get(up30, i)
+        d30 = array.get(down30, i)
+        f30 = array.get(filled30, i)
+        wr30 = f30 > 0 ? float(u30) / f30 * 100 : na
+        chg30 = f30 > 0 ? array.get(sumChg30, i) / f30 : na
+
+        bg30 = na(wr30) ? color.new(color.gray, 85) : wr30 > 50 ? color.new(color.green, 40) : wr30 < 50 ? color.new(color.red, 40) : color.new(color.orange, 40)
+
+        entryT = slotToTime(i)
+        exitT  = i < totalSlots - 1 ? slotToTime(i + 1) : "手仕舞"
+        table.cell(perfTable, 0, i + 3, entryT + "→" + exitT, bgcolor=color.new(color.gray, 85), text_color=color.white)
+        table.cell(perfTable, 1, i + 3, str.tostring(u30),  bgcolor=bg30, text_color=color.white)
+        table.cell(perfTable, 2, i + 3, str.tostring(d30),  bgcolor=bg30, text_color=color.white)
+        table.cell(perfTable, 3, i + 3, na(wr30)  ? "-" : str.tostring(wr30, "#.#"),  bgcolor=bg30, text_color=color.white)
+        table.cell(perfTable, 4, i + 3, na(chg30) ? "-" : str.tostring(chg30, "#.##"), bgcolor=bg30, text_color=color.white)
+
+// === データウィンドウ出力(Python取得用、30日ローリングのみ) ===
+plot(f_wr30(0),  title="30d_0900-0930 勝率%", display=display.data_window, precision=2)
+plot(f_wr30(1),  title="30d_0930-1000 勝率%", display=display.data_window, precision=2)
+plot(f_wr30(2),  title="30d_1000-1030 勝率%", display=display.data_window, precision=2)
+plot(f_wr30(3),  title="30d_1030-1100 勝率%", display=display.data_window, precision=2)
+plot(f_wr30(4),  title="30d_1100-1130 勝率%", display=display.data_window, precision=2)
+plot(f_wr30(5),  title="30d_1230-1300 勝率%", display=display.data_window, precision=2)
+plot(f_wr30(6),  title="30d_1300-1330 勝率%", display=display.data_window, precision=2)
+plot(f_wr30(7),  title="30d_1330-1400 勝率%", display=display.data_window, precision=2)
+plot(f_wr30(8),  title="30d_1400-1430 勝率%", display=display.data_window, precision=2)
+plot(f_wr30(9),  title="30d_1430-1500 勝率%", display=display.data_window, precision=2)
+plot(f_wr30(10), title="30d_1500-1530 勝率%", display=display.data_window, precision=2)
+
+plot(f_chg30(0),  title="30d_0900-0930 平均変化%", display=display.data_window, precision=2)
+plot(f_chg30(1),  title="30d_0930-1000 平均変化%", display=display.data_window, precision=2)
+plot(f_chg30(2),  title="30d_1000-1030 平均変化%", display=display.data_window, precision=2)
+plot(f_chg30(3),  title="30d_1030-1100 平均変化%", display=display.data_window, precision=2)
+plot(f_chg30(4),  title="30d_1100-1130 平均変化%", display=display.data_window, precision=2)
+plot(f_chg30(5),  title="30d_1230-1300 平均変化%", display=display.data_window, precision=2)
+plot(f_chg30(6),  title="30d_1300-1330 平均変化%", display=display.data_window, precision=2)
+plot(f_chg30(7),  title="30d_1330-1400 平均変化%", display=display.data_window, precision=2)
+plot(f_chg30(8),  title="30d_1400-1430 平均変化%", display=display.data_window, precision=2)
+plot(f_chg30(9),  title="30d_1430-1500 平均変化%", display=display.data_window, precision=2)
+plot(f_chg30(10), title="30d_1500-1530 平均変化%", display=display.data_window, precision=2)
