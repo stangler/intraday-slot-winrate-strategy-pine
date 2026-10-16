@@ -1,5 +1,5 @@
 //@version=6
-strategy("時間帯別戦略", overlay=true, max_bars_back=5000, default_qty_type=strategy.fixed, default_qty_value=100, margin_long=0, margin_short=0)
+strategy("時間帯別戦略", overlay=true, max_bars_back=5000, default_qty_type=strategy.fixed, default_qty_value=100, margin_long=0, margin_short=0, process_orders_on_close=true)
 
 lookbackMinCount = input.int(3, "最低サンプル日数(全期間判定用)", minval=1)
 flatAtClose      = input.bool(true, "大引け前に手仕舞い")
@@ -100,6 +100,29 @@ if barstate.isconfirmed
     else if label_ == "下落"
         strategy.entry("Short", strategy.short)
 
+// ── 時間帯別 損益 / プロフィットファクター ──
+// 各バーの資産変動(strategy.equity の差分)を、そのバーの時間帯へ帰属させる。
+// 保有ポジションの含み損益も時間帯ごとに按分され、全区間の合計は総損益(含み損益込み)と一致する。
+// PF = 利益バー合計 ÷ 損失バー合計(絶対値)。Strategy Testerのトレード単位PFとは別集計。
+var slotPnl = array.new_float(totalSlots, 0.0)
+var slotGP  = array.new_float(totalSlots, 0.0)
+var slotGL  = array.new_float(totalSlots, 0.0)
+
+eqDelta = strategy.equity - nz(strategy.equity[1], strategy.equity)
+if barstate.isconfirmed and slot >= 0
+    array.set(slotPnl, slot, array.get(slotPnl, slot) + eqDelta)
+    if eqDelta > 0
+        array.set(slotGP, slot, array.get(slotGP, slot) + eqDelta)
+    else if eqDelta < 0
+        array.set(slotGL, slot, array.get(slotGL, slot) - eqDelta)
+
+f_pnl(idx) =>
+    array.get(slotPnl, idx)
+
+f_pf(idx) =>
+    gl = array.get(slotGL, idx)
+    gl > 0 ? array.get(slotGP, idx) / gl : na
+
 slotToTime(i) =>
     mins = i < morningSlots ? morningStart + i*30 : afternoonStart + (i - morningSlots)*30
     hh = int(mins / 60)
@@ -115,13 +138,13 @@ f_chg30(idx) =>
     f > 0 ? array.get(sumChg30, idx) / f : na
 
 if showTable and barstate.islast
-    var table perfTable = table.new(position.top_right, 5, totalSlots + 3, border_width=1)
+    var table perfTable = table.new(position.top_right, 7, totalSlots + 4, border_width=1)
     table.cell(perfTable, 0, 0, "", bgcolor=color.new(color.orange,50))
-    for cc = 1 to 4
+    for cc = 1 to 6
         table.cell(perfTable, cc, 0, "", bgcolor=color.new(color.orange,50))
 
     table.cell(perfTable, 0, 1, "全期間: " + str.tostring(dayCount) + "日", bgcolor=color.new(color.orange,50), text_color=color.white)
-    for cc = 1 to 4
+    for cc = 1 to 6
         table.cell(perfTable, cc, 1, "", bgcolor=color.new(color.orange,50))
 
     table.cell(perfTable, 0, 2, "区間",        bgcolor=color.new(color.blue,70), text_color=color.white)
@@ -129,6 +152,8 @@ if showTable and barstate.islast
     table.cell(perfTable, 2, 2, "30日陰",      bgcolor=color.new(color.blue,70), text_color=color.white)
     table.cell(perfTable, 3, 2, "30日勝率%",   bgcolor=color.new(color.blue,70), text_color=color.white)
     table.cell(perfTable, 4, 2, "30日平均変化%", bgcolor=color.new(color.blue,70), text_color=color.white)
+    table.cell(perfTable, 5, 2, "損益",        bgcolor=color.new(color.blue,70), text_color=color.white)
+    table.cell(perfTable, 6, 2, "PF",          bgcolor=color.new(color.blue,70), text_color=color.white)
 
     for i = 0 to totalSlots - 1
         u30 = array.get(up30, i)
@@ -147,7 +172,27 @@ if showTable and barstate.islast
         table.cell(perfTable, 3, i + 3, na(wr30)  ? "-" : str.tostring(wr30, "#.#"),  bgcolor=bg30, text_color=color.white)
         table.cell(perfTable, 4, i + 3, na(chg30) ? "-" : str.tostring(chg30, "#.##"), bgcolor=bg30, text_color=color.white)
 
-// === データウィンドウ出力(Python取得用、30日ローリングのみ) ===
+        pnlI = array.get(slotPnl, i)
+        glI  = array.get(slotGL, i)
+        gpI  = array.get(slotGP, i)
+        pfI  = glI > 0 ? gpI / glI : na
+        bgPnl = pnlI > 0 ? color.new(color.green, 40) : pnlI < 0 ? color.new(color.red, 40) : color.new(color.gray, 85)
+        bgPf  = na(pfI) ? color.new(color.gray, 85) : pfI > 1 ? color.new(color.green, 40) : pfI < 1 ? color.new(color.red, 40) : color.new(color.orange, 40)
+        pfTxt = na(pfI) ? (gpI > 0 ? "∞" : "-") : str.tostring(pfI, "#.##")
+        table.cell(perfTable, 5, i + 3, str.tostring(pnlI, "#"), bgcolor=bgPnl, text_color=color.white)
+        table.cell(perfTable, 6, i + 3, pfTxt, bgcolor=bgPf, text_color=color.white)
+
+    totPnl = array.sum(slotPnl)
+    totGP  = array.sum(slotGP)
+    totGL  = array.sum(slotGL)
+    totPF  = totGL > 0 ? totGP / totGL : na
+    for cc = 1 to 4
+        table.cell(perfTable, cc, totalSlots + 3, "", bgcolor=color.new(color.gray, 85))
+    table.cell(perfTable, 0, totalSlots + 3, "合計", bgcolor=color.new(color.gray, 85), text_color=color.white)
+    table.cell(perfTable, 5, totalSlots + 3, str.tostring(totPnl, "#"), bgcolor=totPnl > 0 ? color.new(color.green, 40) : color.new(color.red, 40), text_color=color.white)
+    table.cell(perfTable, 6, totalSlots + 3, na(totPF) ? "-" : str.tostring(totPF, "#.##"), bgcolor=color.new(color.gray, 85), text_color=color.white)
+
+// === データウィンドウ出力(Python取得用: 30日ローリング + 時間帯別損益/PF) ===
 plot(f_wr30(0),  title="30d_0900-0930 勝率%", display=display.data_window, precision=2)
 plot(f_wr30(1),  title="30d_0930-1000 勝率%", display=display.data_window, precision=2)
 plot(f_wr30(2),  title="30d_1000-1030 勝率%", display=display.data_window, precision=2)
@@ -171,3 +216,27 @@ plot(f_chg30(7),  title="30d_1330-1400 平均変化%", display=display.data_wind
 plot(f_chg30(8),  title="30d_1400-1430 平均変化%", display=display.data_window, precision=2)
 plot(f_chg30(9),  title="30d_1430-1500 平均変化%", display=display.data_window, precision=2)
 plot(f_chg30(10), title="30d_1500-1530 平均変化%", display=display.data_window, precision=2)
+
+plot(f_pnl(0), title="pl_0900-0930 損益", display=display.data_window, precision=0)
+plot(f_pnl(1), title="pl_0930-1000 損益", display=display.data_window, precision=0)
+plot(f_pnl(2), title="pl_1000-1030 損益", display=display.data_window, precision=0)
+plot(f_pnl(3), title="pl_1030-1100 損益", display=display.data_window, precision=0)
+plot(f_pnl(4), title="pl_1100-1130 損益", display=display.data_window, precision=0)
+plot(f_pnl(5), title="pl_1230-1300 損益", display=display.data_window, precision=0)
+plot(f_pnl(6), title="pl_1300-1330 損益", display=display.data_window, precision=0)
+plot(f_pnl(7), title="pl_1330-1400 損益", display=display.data_window, precision=0)
+plot(f_pnl(8), title="pl_1400-1430 損益", display=display.data_window, precision=0)
+plot(f_pnl(9), title="pl_1430-1500 損益", display=display.data_window, precision=0)
+plot(f_pnl(10), title="pl_1500-1530 損益", display=display.data_window, precision=0)
+
+plot(f_pf(0), title="pf_0900-0930 PF", display=display.data_window, precision=2)
+plot(f_pf(1), title="pf_0930-1000 PF", display=display.data_window, precision=2)
+plot(f_pf(2), title="pf_1000-1030 PF", display=display.data_window, precision=2)
+plot(f_pf(3), title="pf_1030-1100 PF", display=display.data_window, precision=2)
+plot(f_pf(4), title="pf_1100-1130 PF", display=display.data_window, precision=2)
+plot(f_pf(5), title="pf_1230-1300 PF", display=display.data_window, precision=2)
+plot(f_pf(6), title="pf_1300-1330 PF", display=display.data_window, precision=2)
+plot(f_pf(7), title="pf_1330-1400 PF", display=display.data_window, precision=2)
+plot(f_pf(8), title="pf_1400-1430 PF", display=display.data_window, precision=2)
+plot(f_pf(9), title="pf_1430-1500 PF", display=display.data_window, precision=2)
+plot(f_pf(10), title="pf_1500-1530 PF", display=display.data_window, precision=2)
