@@ -1,5 +1,5 @@
 //@version=6
-strategy("時間帯別戦略", overlay=true, max_bars_back=5000, default_qty_type=strategy.fixed, default_qty_value=100, margin_long=0, margin_short=0, process_orders_on_close=true)
+strategy("時間帯別戦略", overlay=true, max_bars_back=5000, default_qty_type=strategy.fixed, default_qty_value=100, margin_long=0, margin_short=0)
 
 lookbackMinCount = input.int(3, "最低サンプル日数(全期間判定用)", minval=1)
 flatAtClose      = input.bool(true, "大引け前に手仕舞い")
@@ -92,12 +92,20 @@ bg = switch label_
 
 bgcolor(bg)
 
-if barstate.isconfirmed
+// ── 次の足(次スロット)の勝率で、その足の保有方向を決める ──
+// 足の確定時に注文 → 次の足の始値で約定。9:00の足も前日大引けの注文で始値から保有できる。
+// 大引けは immediately=true で終値約定させ、夜間は持ち越さない。
+nxtSlot  = slot >= 0 ? (slot + 1) % totalSlots : -1
+nxtN     = nxtSlot >= 0 ? array.get(cntAll, nxtSlot) : 0
+nxtWin   = nxtN > 0 ? array.get(cntUp, nxtSlot) / nxtN : na
+nxtLabel = nxtN < lookbackMinCount ? "データ不足" : nxtWin > 0.5 ? "上昇" : nxtWin < 0.5 ? "下落" : "五分五分"
+
+if barstate.isconfirmed and slot >= 0
     if flatAtClose and slot == totalSlots - 1
-        strategy.close_all()
-    else if label_ == "上昇"
+        strategy.close_all(immediately=true)
+    if nxtLabel == "上昇"
         strategy.entry("Long", strategy.long)
-    else if label_ == "下落"
+    else if nxtLabel == "下落"
         strategy.entry("Short", strategy.short)
 
 // ── 時間帯別 損益 / プロフィットファクター ──
