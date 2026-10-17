@@ -4,6 +4,10 @@ strategy("時間帯別戦略", overlay=true, max_bars_back=5000, default_qty_typ
 lookbackMinCount = input.int(3, "最低サンプル日数(全期間判定用)", minval=1)
 flatAtClose      = input.bool(true, "大引け前に手仕舞い")
 showTable        = input.bool(true, "スロット別成績表示")
+showBgColor      = input.bool(false, "背景色を表示(上昇/下落判定)")
+
+// 売買単位: 1570(日経レバ)のみ1株、その他は100株
+tradeQty = syminfo.ticker == "1570" ? 1 : 100
 
 if timeframe.period != "30"
     runtime.error("30分足専用")
@@ -90,7 +94,7 @@ bg = switch label_
     "下落" => color.new(color.red, 40)
     => na
 
-bgcolor(bg)
+bgcolor(showBgColor ? bg : na)
 
 // ── 次の足(次スロット)の勝率で、その足の保有方向を決める ──
 // 足の確定時に注文 → 次の足の始値で約定。9:00の足も前日大引けの注文で始値から保有できる。
@@ -104,9 +108,9 @@ if barstate.isconfirmed and slot >= 0
     if flatAtClose and slot == totalSlots - 1
         strategy.close_all(immediately=true)
     if nxtLabel == "上昇"
-        strategy.entry("Long", strategy.long)
+        strategy.entry("Long", strategy.long, qty=tradeQty)
     else if nxtLabel == "下落"
-        strategy.entry("Short", strategy.short)
+        strategy.entry("Short", strategy.short, qty=tradeQty)
 
 // ── 時間帯別 損益 / プロフィットファクター ──
 // 各バーの資産変動(strategy.equity の差分)を、そのバーの時間帯へ帰属させる。
@@ -187,7 +191,7 @@ if showTable and barstate.islast
         bgPnl = pnlI > 0 ? color.new(color.green, 40) : pnlI < 0 ? color.new(color.red, 40) : color.new(color.gray, 85)
         bgPf  = na(pfI) ? color.new(color.gray, 85) : pfI > 1 ? color.new(color.green, 40) : pfI < 1 ? color.new(color.red, 40) : color.new(color.orange, 40)
         pfTxt = na(pfI) ? (gpI > 0 ? "∞" : "-") : str.tostring(pfI, "#.##")
-        table.cell(perfTable, 5, i + 3, str.tostring(pnlI, "#"), bgcolor=bgPnl, text_color=color.white)
+        table.cell(perfTable, 5, i + 3, str.tostring(pnlI, "#,###"), bgcolor=bgPnl, text_color=color.white)
         table.cell(perfTable, 6, i + 3, pfTxt, bgcolor=bgPf, text_color=color.white)
 
     totPnl = array.sum(slotPnl)
@@ -197,7 +201,7 @@ if showTable and barstate.islast
     for cc = 1 to 4
         table.cell(perfTable, cc, totalSlots + 3, "", bgcolor=color.new(color.gray, 85))
     table.cell(perfTable, 0, totalSlots + 3, "合計", bgcolor=color.new(color.gray, 85), text_color=color.white)
-    table.cell(perfTable, 5, totalSlots + 3, str.tostring(totPnl, "#"), bgcolor=totPnl > 0 ? color.new(color.green, 40) : color.new(color.red, 40), text_color=color.white)
+    table.cell(perfTable, 5, totalSlots + 3, str.tostring(totPnl, "#,###"), bgcolor=totPnl > 0 ? color.new(color.green, 40) : color.new(color.red, 40), text_color=color.white)
     table.cell(perfTable, 6, totalSlots + 3, na(totPF) ? "-" : str.tostring(totPF, "#.##"), bgcolor=color.new(color.gray, 85), text_color=color.white)
 
 // === データウィンドウ出力(Python取得用: 30日ローリング + 時間帯別損益/PF) ===
